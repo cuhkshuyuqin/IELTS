@@ -4,41 +4,196 @@
     "instruction_text": null,
     "strictness": 1,
     "output_format": "scalar",
-    "icl_strategy": "score_balanced",
-    "k_shots": 8,
+    "icl_strategy": "quantile_stratified",
+    "k_shots": 12,
     "rag_strategy": "none",
     "use_summary": false,
     "use_teacher": false,
     "teacher_weight": 0.0
   },
   "best_metrics": {
-    "qwk": 0.5,
-    "pearson": 0.6630526192697351,
-    "rmse": 1.352081728298996,
-    "exact_acc": 0.125,
-    "adj_acc": 0.3541666666666667
+    "qwk": 0.44113663217960175,
+    "pearson": 0.4697185009553,
+    "rmse": 1.5385667031363963,
+    "exact_acc": 0.078125,
+    "adj_acc": 0.34375
   },
-  "best_fitness": 0.4284994401211213,
+  "best_fitness": 0.27433884183891244,
   "history_qwk": [
-    0.5055401662049861,
-    0.5055401662049861,
-    0.5055401662049861,
-    0.5055401662049861,
-    0.5
+    0.4315266617969321,
+    0.44113663217960175,
+    0.44113663217960175,
+    0.44113663217960175,
+    0.44113663217960175,
+    0.44113663217960175
   ],
   "history_pearson": [
-    0.6472767428398201,
-    0.6472767428398201,
-    0.6472767428398201,
-    0.6472767428398201,
-    0.6630526192697351
+    0.48989425959691973,
+    0.4697185009553,
+    0.4697185009553,
+    0.4697185009553,
+    0.4697185009553,
+    0.4697185009553
   ],
   "history_rmse": [
-    1.3635890143294642,
-    1.3635890143294642,
-    1.3635890143294642,
-    1.3635890143294642,
-    1.352081728298996
+    1.541103500742244,
+    1.5385667031363963,
+    1.5385667031363963,
+    1.5385667031363963,
+    1.5385667031363963,
+    1.5385667031363963
   ],
-  "single_model": "x-ai/grok-4.1-fast:free"
+  "history_llm_stats": [
+    {
+      "gen": 1,
+      "text": {
+        "triggered": 5,
+        "tries": 5,
+        "success": 5,
+        "fail_empty": 0,
+        "fail_short": 0,
+        "fail_similar": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      },
+      "icl": {
+        "triggered": 6,
+        "tries": 6,
+        "success": 6,
+        "fail_empty": 0,
+        "fail_parse": 0,
+        "fail_invalid": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      }
+    },
+    {
+      "gen": 2,
+      "text": {
+        "triggered": 5,
+        "tries": 5,
+        "success": 5,
+        "fail_empty": 0,
+        "fail_short": 0,
+        "fail_similar": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      },
+      "icl": {
+        "triggered": 7,
+        "tries": 7,
+        "success": 7,
+        "fail_empty": 0,
+        "fail_parse": 0,
+        "fail_invalid": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      }
+    },
+    {
+      "gen": 3,
+      "text": {
+        "triggered": 6,
+        "tries": 6,
+        "success": 6,
+        "fail_empty": 0,
+        "fail_short": 0,
+        "fail_similar": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      },
+      "icl": {
+        "triggered": 6,
+        "tries": 6,
+        "success": 6,
+        "fail_empty": 0,
+        "fail_parse": 0,
+        "fail_invalid": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      }
+    },
+    {
+      "gen": 4,
+      "text": {
+        "triggered": 8,
+        "tries": 8,
+        "success": 8,
+        "fail_empty": 0,
+        "fail_short": 0,
+        "fail_similar": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      },
+      "icl": {
+        "triggered": 7,
+        "tries": 7,
+        "success": 7,
+        "fail_empty": 0,
+        "fail_parse": 0,
+        "fail_invalid": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      }
+    },
+    {
+      "gen": 5,
+      "text": {
+        "triggered": 8,
+        "tries": 8,
+        "success": 8,
+        "fail_empty": 0,
+        "fail_short": 0,
+        "fail_similar": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      },
+      "icl": {
+        "triggered": 6,
+        "tries": 6,
+        "success": 6,
+        "fail_empty": 0,
+        "fail_parse": 0,
+        "fail_invalid": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 1.0,
+        "success_rate_per_try": 1.0
+      }
+    },
+    {
+      "gen": 6,
+      "text": {
+        "triggered": 0,
+        "tries": 0,
+        "success": 0,
+        "fail_empty": 0,
+        "fail_short": 0,
+        "fail_similar": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 0.0,
+        "success_rate_per_try": 0.0
+      },
+      "icl": {
+        "triggered": 0,
+        "tries": 0,
+        "success": 0,
+        "fail_empty": 0,
+        "fail_parse": 0,
+        "fail_invalid": 0,
+        "fail_exception": 0,
+        "success_rate_per_trigger": 0.0,
+        "success_rate_per_try": 0.0
+      }
+    }
+  ],
+  "single_model": "meta-llama/llama-3.3-70b-instruct"
 }

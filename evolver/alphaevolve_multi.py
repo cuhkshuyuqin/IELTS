@@ -64,20 +64,20 @@ METRIC_FIG = LOG_DIR / "metrics_curve_hf.png"
 TEMPLATE_POOL_JSON = LOG_DIR / "template_pool.json"
 
 # -------- GA 超参数 --------
-POP_SIZE = 8
-N_GENERATIONS = 5
-TOURNAMENT_K = 3
-CROSSOVER_RATE = 0.8
-MUTATION_RATE = 0.4
+POP_SIZE = 10
+N_GENERATIONS = 6
+TOURNAMENT_K = 4
+CROSSOVER_RATE = 0.85
+MUTATION_RATE = 0.35
 
-N_EVAL_SAMPLES = 48
+N_EVAL_SAMPLES = 64
 
 MAX_CONTEXT_CHARS = 12000
 EARLYSTOP_CONSEC_FAIL = 3
-EARLYSTOP_FAIL_RATE = 0.7
-MIN_SAMPLES_BEFORE_EARLYSTOP = 5
+EARLYSTOP_FAIL_RATE = 0.6
+MIN_SAMPLES_BEFORE_EARLYSTOP = 8
 
-SINGLE_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
+SINGLE_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
 
 MIN_INTERVAL = 6.5
 _last_call_ts = 0.0
@@ -438,7 +438,7 @@ def run_evolution_hf_icl_only():
     population: List[Individual] = build_initial_population(pop_size=POP_SIZE)
 
     history_qwk, history_pearson, history_rmse = [], [], []
-    history_llm_stats: List[Dict[str, Any]] = []  # ✅ 新增：每代 LLM 统计
+    history_llm_stats: List[Dict[str, Any]] = []
 
     best_overall_ind: Optional[Individual] = None
     best_overall_fitness = -math.inf
@@ -448,13 +448,14 @@ def run_evolution_hf_icl_only():
     for gen in range(1, N_GENERATIONS + 1):
         print(f"\n=== Generation {gen}/{N_GENERATIONS} ===")
 
-        # ✅ 每代开始清空 LLM 统计（统计该代 LLM 贡献）
+        # ✅ 每代开始清空 LLM 统计：统计“本代产生下一代时”的 LLM 贡献
         reset_llm_stats()
 
         gen_best_ind: Optional[Individual] = None
         gen_best_metrics: Optional[Dict[str, float]] = None
         gen_best_fitness = -math.inf
 
+        # ====== 评估本代所有个体 ======
         for i, ind in enumerate(population, start=1):
             print(f"\n[Gen {gen}] Individual {i}/{len(population)}")
             print(f"Genome: {ind.genome}")
@@ -464,7 +465,7 @@ def run_evolution_hf_icl_only():
 
             if fit > gen_best_fitness:
                 gen_best_fitness = fit
-                gen_best_ind = Individual(genome=copy.deepcopy(ind.genome), fitness=fit, metrics=metrics)
+                gen_best_ind = copy.deepcopy(ind)  # ✅ 保留 labels/preds/metrics
                 gen_best_metrics = metrics
 
         assert gen_best_ind is not None and gen_best_metrics is not None
@@ -484,12 +485,14 @@ def run_evolution_hf_icl_only():
         # ✅ 更新 overall best
         if gen_best_fitness > best_overall_fitness:
             best_overall_fitness = gen_best_fitness
-            best_overall_ind = gen_best_ind
+            best_overall_ind = copy.deepcopy(gen_best_ind)
 
         # ✅ 计算偏差统计 + 喂给 LLM
         best_text = (
             gen_best_ind.genome.instruction_text
-            or INSTRUCTION_TEMPLATES.get(gen_best_ind.genome.instruction_id, INSTRUCTION_TEMPLATES[0])
+            or INSTRUCTION_TEMPLATES.get(
+                gen_best_ind.genome.instruction_id, INSTRUCTION_TEMPLATES[0]
+            )
         )
         bias_stats = compute_bias_stats(gen_best_ind.labels or [], gen_best_ind.preds or [])
         set_llm_feedback(best_text, bias_stats, gen_best_metrics, gen)
@@ -497,30 +500,37 @@ def run_evolution_hf_icl_only():
         # ✅ 把好模板写进模板池并持久化
         update_template_pool(best_text, gen_best_fitness, gen_best_metrics, gen)
 
-        # ✅ 本代 LLM 变异统计打印 + 记录
+        # ====== 产生下一代（最后一代不需要生成） ======
+        if gen < N_GENERATIONS:
+            parents = tournament_selection(
+                population, k=TOURNAMENT_K, num_winners=POP_SIZE
+            )
+            new_population: List[Individual] = []
+            # elitism: 保留本代最优
+            new_population.append(
+                Individual(genome=copy.deepcopy(gen_best_ind.genome))
+            )
+
+            rng = random.Random(gen * 999)
+            while len(new_population) < POP_SIZE:
+                p1, p2 = rng.sample(parents, 2)
+                child_genome = copy.deepcopy(p1.genome)
+
+                if rng.random() < CROSSOVER_RATE:
+                    child_genome = crossover_genome(p1.genome, p2.genome, rng)
+
+                child_genome = mutate_genome(
+                    child_genome, mutation_rate=MUTATION_RATE, rng=rng
+                )
+                new_population.append(Individual(genome=child_genome))
+
+            population = new_population
+
+        # ✅ 变异都发生完了（或最后一代无变异），再统计/打印
         stats = get_llm_stats()
         history_llm_stats.append({"gen": gen, **stats})
         print(f"\n[Gen {gen}] LLM mutation stats:")
         print(json.dumps(stats, ensure_ascii=False, indent=2))
-
-        # ==== 产生下一代 ====
-        parents = tournament_selection(population, k=TOURNAMENT_K, num_winners=POP_SIZE)
-        new_population: List[Individual] = []
-        # elitism: 保留本代最优
-        new_population.append(Individual(genome=copy.deepcopy(gen_best_ind.genome)))
-
-        rng = random.Random(gen * 999)
-        while len(new_population) < POP_SIZE:
-            p1, p2 = rng.sample(parents, 2)
-            child_genome = copy.deepcopy(p1.genome)
-
-            if rng.random() < CROSSOVER_RATE:
-                child_genome = crossover_genome(p1.genome, p2.genome, rng)
-
-            child_genome = mutate_genome(child_genome, mutation_rate=MUTATION_RATE, rng=rng)
-            new_population.append(Individual(genome=child_genome))
-
-        population = new_population
 
     print("\n==== Evolution Finished (HF ICL-only) ====")
     if best_overall_ind is None:
@@ -537,7 +547,7 @@ def run_evolution_hf_icl_only():
         "history_qwk": history_qwk,
         "history_pearson": history_pearson,
         "history_rmse": history_rmse,
-        "history_llm_stats": history_llm_stats,  # ✅ 新增
+        "history_llm_stats": history_llm_stats,
         "single_model": SINGLE_MODEL,
     }
 
@@ -578,7 +588,6 @@ def run_evolution_hf_icl_only():
     preds, raws, labels, essays_out = [], [], [], []
 
     for i, (sid, essay, true_band, prompt_text) in enumerate(final_pool, start=1):
-
         icl_examples = select_icl_examples(
             train_pool,
             strategy=best_overall_ind.genome.icl_strategy,
@@ -647,6 +656,7 @@ def run_evolution_hf_icl_only():
     df_out.to_csv(BEST_PRED_CSV, index=False, encoding="utf-8-sig")
     print(f"📄 Predictions saved: {BEST_PRED_CSV}")
     print("🎉 Done!")
+
 
 
 if __name__ == "__main__":

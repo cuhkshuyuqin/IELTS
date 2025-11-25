@@ -2,16 +2,16 @@
   "templates": [
     {
       "text": "You are an IELTS Writing Task 2 examiner. Evaluate essays according to official band descriptors.",
-      "fitness": 0.4284994401211213,
+      "fitness": 0.44815243312444447,
       "metrics": {
-        "qwk": 0.5,
-        "pearson": 0.6630526192697351,
-        "rmse": 1.352081728298996,
-        "exact_acc": 0.125,
-        "adj_acc": 0.3541666666666667
+        "qwk": 0.5585585585585586,
+        "pearson": 0.5845589263019664,
+        "rmse": 1.4288690166235205,
+        "exact_acc": 0.1875,
+        "adj_acc": 0.5
       },
-      "gen": 5,
-      "ts": 1763986540.2482421
+      "gen": 1,
+      "ts": 1764006261.9129117
     },
     {
       "text": "You are a certified IELTS Writing Task 2 examiner. Score essays using TR, CC, LR, and GRA criteria.",
@@ -25,7 +25,33 @@
       },
       "gen": 3,
       "ts": 1763906876.4492123
+    },
+    {
+      "text": "You are an IELTS Writing Task 2 examiner. Assess the essay using the official band descriptors.",
+      "fitness": 0.27433884183891244,
+      "metrics": {
+        "qwk": 0.44113663217960175,
+        "pearson": 0.4697185009553,
+        "rmse": 1.5385667031363963,
+        "exact_acc": 0.078125,
+        "adj_acc": 0.34375
+      },
+      "gen": 2,
+      "ts": 1764049243.6826327
+    },
+    {
+      "text": "You are an IELTS Writing Task 2 examiner. Evaluate Task Response, Coherence and Cohesion, Lexical Resource, and Grammatical Range and Accuracy, then decide an overall band.",
+      "fitness": 0.27027423952755913,
+      "metrics": {
+        "qwk": 0.4315266617969321,
+        "pearson": 0.48989425959691973,
+        "rmse": 1.541103500742244,
+        "exact_acc": 0.078125,
+        "adj_acc": 0.28125
+      },
+      "gen": 1,
+      "ts": 1764046292.132596
     }
   ],
-  "updated_at": 1763986540.2482421
+  "updated_at": 1764062529.0501783
 }

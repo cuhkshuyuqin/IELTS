@@ -9,6 +9,8 @@ import re
 import json
 import time
 from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv()
 
 from evolver.data_aware_prompt import PromptGenome, INSTRUCTION_TEMPLATES
 from llm_api.openrouter_api import call_scoring_llm
@@ -26,13 +28,9 @@ class Individual:
 
 # ======= Gene spaces =======
 INSTRUCTION_IDS = sorted(list(INSTRUCTION_TEMPLATES.keys()))
-
-# ✅ 去掉 strictness=2（过严导致压分）
 STRICTNESS_LEVELS = [0, 1]
-
 OUTPUT_FORMATS = ["scalar"]
 
-# ✅ 新增 ICL 策略，用来对抗“均分偏置/极端分段不准”
 ICL_STRATEGIES = [
     "random",
     "score_balanced",
@@ -41,7 +39,6 @@ ICL_STRATEGIES = [
     "extreme_balanced",
 ]
 
-# ✅ 往上拓展 shots 搜索空间
 K_SHOTS = [6, 8, 10, 12, 16]
 
 RAG_STRATEGIES = ["none"]
@@ -51,20 +48,20 @@ TEACHER_WEIGHT = [0.0]
 
 # ======= LLM text-mutation switches =======
 USE_LLM_TEXT_MUTATION = os.getenv("USE_LLM_TEXT_MUTATION", "1") == "1"
-LLM_TEXT_MUTATION_PROB = float(os.getenv("LLM_TEXT_MUTATION_PROB", "0.25"))
+LLM_TEXT_MUTATION_PROB = float(os.getenv("LLM_TEXT_MUTATION_PROB", "0.8"))
 LLM_TEXT_MUTATION_MODEL = os.getenv(
     "LLM_TEXT_MUTATION_MODEL",
-    os.getenv("OPENROUTER_MODEL", "x-ai/grok-4.1-fast:free")
+    os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
 )
-LLM_TEXT_MAX_CHARS = int(os.getenv("LLM_TEXT_MAX_CHARS", "650"))
+LLM_TEXT_MAX_CHARS = int(os.getenv("LLM_TEXT_MAX_CHARS", "900"))
 LLM_TEXT_MAX_TRIES = int(os.getenv("LLM_TEXT_MAX_TRIES", "2"))
 
 # ======= LLM ICL-mutation switches =======
 USE_LLM_ICL_MUTATION = os.getenv("USE_LLM_ICL_MUTATION", "1") == "1"
-LLM_ICL_MUTATION_PROB = float(os.getenv("LLM_ICL_MUTATION_PROB", "0.30"))
+LLM_ICL_MUTATION_PROB = float(os.getenv("LLM_ICL_MUTATION_PROB", "0.7"))
 LLM_ICL_MUTATION_MODEL = os.getenv(
     "LLM_ICL_MUTATION_MODEL",
-    os.getenv("OPENROUTER_MODEL", "x-ai/grok-4.1-fast:free")
+    os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
 )
 LLM_ICL_MAX_TRIES = int(os.getenv("LLM_ICL_MAX_TRIES", "2"))
 
@@ -109,6 +106,7 @@ def load_template_pool(path: str | Path, max_keep: int = 60) -> List[TemplateRec
         recs = []
         for d in data.get("templates", []):
             text = str(d.get("text", "")).strip()
+            text = _clean_instruction_text(text)  # ✅ FIX: 载入时也清理尾巴
             if not text:
                 continue
             recs.append(
@@ -142,7 +140,7 @@ def save_template_pool(path: str | Path):
 def update_template_pool(text: str, fitness: float, metrics: Dict[str, float], gen: int, max_keep: int = 60):
     """加入一个新好模板，去重 + 只保留 topK。"""
     global _TEMPLATE_POOL
-    text = text.strip()
+    text = _clean_instruction_text(text)  # ✅ FIX: 入池前先清理尾巴
     if not text:
         return
 
@@ -285,6 +283,8 @@ def crossover_genome(g1: PromptGenome, g2: PromptGenome, rng: random.Random) -> 
     if g2.instruction_text and not g1.instruction_text and rng.random() < 0.7:
         instruction_text = g2.instruction_text
 
+    instruction_text = _clean_instruction_text(instruction_text or "") or instruction_text  # ✅ FIX
+
     return PromptGenome(
         instruction_id=rng.choice([g1.instruction_id, g2.instruction_id]),
         instruction_text=instruction_text,
@@ -299,16 +299,54 @@ def crossover_genome(g1: PromptGenome, g2: PromptGenome, rng: random.Random) -> 
     )
 
 
-# ================== LLM text mutation ================== #
+# ================== LLM text mutation helpers ================== #
+
+def _clean_llm_tail_scores(t: str) -> str:
+    """
+    ✅ FIX: 清理 LLM 产物末尾“孤立 band 分数”或被截断的分数字尾巴。
+    只处理结尾，避免误伤正文中的数字。
+    """
+    if not t:
+        return t
+    t = t.strip()
+
+    # a) 如果最后一行只有一个 band 数字（7.0/6.5/8），删掉
+    lines = [ln.rstrip() for ln in t.splitlines()]
+    while lines:
+        last = lines[-1].strip()
+        if re.fullmatch(r"[0-9](?:\.5)?", last):
+            lines.pop()
+            continue
+        break
+    t = "\n".join(lines).strip()
+
+    # b) 如果末尾是 “... 7.0” 这种尾巴，切掉尾部 band
+    t = re.sub(
+        r"(\s|[。.!?;:,，；：])([0-9](?:\.5)?)\s*$",
+        r"\1",
+        t
+    ).strip()
+
+    return t
+
 
 def _clean_instruction_text(t: str) -> str:
-    t = t.strip()
+    t = (t or "").strip()
     t = re.sub(r"^```.*?\n|\n```$", "", t, flags=re.S).strip()
     t = t.strip('"').strip("'").strip()
     t = re.sub(r"\s+", " ", t).strip()
+
+    # ✅ FIX: 统一清理末尾 band 尾巴
+    t = _clean_llm_tail_scores(t)
+
     if len(t) > LLM_TEXT_MAX_CHARS:
         t = t[:LLM_TEXT_MAX_CHARS].rstrip()
+
+    # 再保险一次（截断后可能又形成尾巴）
+    t = _clean_llm_tail_scores(t)
+
     return t
+
 
 def _rough_similarity(a: str, b: str) -> float:
     sa, sb = set(a.lower().split()), set(b.lower().split())
@@ -460,6 +498,7 @@ def llm_generate_new_instruction(current: PromptGenome) -> Optional[str]:
         "- You MUST change the structure and phrasing substantially (not just synonyms).\n"
         "- Include explicit weighting/priorities among TR, CC, LR, GRA.\n"
         "- Add a short rule about avoiding central-tendency bias (do not overuse 6.0/6.5).\n"
+        "- Do NOT output any band score numbers at the end or anywhere (e.g., '7.0', '6.5').\n"
         "Return ONLY the rewritten instruction text."
     )
 
@@ -470,7 +509,7 @@ def llm_generate_new_instruction(current: PromptGenome) -> Optional[str]:
                 prompt,
                 temperature=0.6,
                 model=LLM_TEXT_MUTATION_MODEL,
-                max_tokens=220,
+                max_tokens=220,   # 这里不用改，已足够；尾巴由清理函数兜底
                 max_retries=2,
                 timeout=60,
             )
@@ -478,7 +517,7 @@ def llm_generate_new_instruction(current: PromptGenome) -> Optional[str]:
                 _stat_inc("text", "fail_empty", 1)
                 continue
 
-            new_text = _clean_instruction_text(reply)
+            new_text = _clean_instruction_text(reply)  # ✅ FIX: 会自动清理尾巴
 
             if len(new_text) < 40:
                 _stat_inc("text", "fail_short", 1)
@@ -508,7 +547,7 @@ def mutate_genome(g: PromptGenome, mutation_rate: float, rng: random.Random) -> 
         _stat_inc("text", "triggered", 1)
         t = llm_generate_new_instruction(g)
         if t is not None:
-            new_instruction_text = t
+            new_instruction_text = _clean_instruction_text(t)  # ✅ FIX
 
     # ---- 2) ICL-level mutation by LLM ----
     new_icl_strategy = g.icl_strategy
@@ -532,7 +571,7 @@ def mutate_genome(g: PromptGenome, mutation_rate: float, rng: random.Random) -> 
 
     return PromptGenome(
         instruction_id=maybe(new_instruction_id, INSTRUCTION_IDS),
-        instruction_text=new_instruction_text,
+        instruction_text=_clean_instruction_text(new_instruction_text or "") or new_instruction_text,  # ✅ FIX
         strictness=maybe(g.strictness, STRICTNESS_LEVELS),
         output_format=g.output_format,
         icl_strategy=new_icl_strategy,
@@ -541,4 +580,15 @@ def mutate_genome(g: PromptGenome, mutation_rate: float, rng: random.Random) -> 
         use_summary=maybe(g.use_summary, USE_SUMMARY),
         use_teacher=maybe(g.use_teacher, USE_TEACHER),
         teacher_weight=maybe(g.teacher_weight, TEACHER_WEIGHT),
+    )
+
+
+if __name__ == "__main__":
+
+    print(
+        "[ENV CHECK]",
+        "USE_LLM_TEXT_MUTATION=", USE_LLM_TEXT_MUTATION,
+        "PROB=", LLM_TEXT_MUTATION_PROB,
+        "USE_LLM_ICL_MUTATION=", USE_LLM_ICL_MUTATION,
+        "PROB=", LLM_ICL_MUTATION_PROB,
     )
