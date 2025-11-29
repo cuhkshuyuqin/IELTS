@@ -79,7 +79,8 @@ MIN_SAMPLES_BEFORE_EARLYSTOP = 8
 
 SINGLE_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
 
-MIN_INTERVAL = 6.5
+# 可配置的最小调用间隔（秒）
+MIN_INTERVAL = float(os.getenv("OPENROUTER_MIN_INTERVAL", "1.0"))
 _last_call_ts = 0.0
 
 

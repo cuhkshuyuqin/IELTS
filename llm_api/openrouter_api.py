@@ -1,13 +1,32 @@
 # llm_api/openrouter_api.py
 from __future__ import annotations
 import os, time, random, json
-from typing import Optional
+from typing import Optional, Dict, Any, List
 import requests
+from dotenv import load_dotenv
+load_dotenv()
 
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "mistralai/mistral-small-3.1-24b-instruct:free")
+
+# ======= Provider 配置（从 .env 读取）=======
+def get_provider_config() -> Optional[Dict[str, Any]]:
+    """
+    从环境变量读取 provider 配置。
+    如果未指定，返回 None（使用 OpenRouter 默认路由）。
+    """
+    provider = os.getenv("OPENROUTER_PROVIDER", "").strip()
+    
+    if not provider:
+        return None
+    
+    # 指定单个 provider，不允许 fallback
+    return {
+        "order": [provider],
+        "allow_fallbacks": False,
+    }
 
 SYSTEM_PROMPT = (
     "You are an IELTS Writing Task 2 examiner. "
@@ -71,16 +90,8 @@ def call_scoring_llm(
         "X-Title": "IELTS-AlphaEvolve",
     }
 
-    # 关键：provider 路由控制
-    # - ignore: 屏蔽 Chutes（你日志里限流的上游）
-    # - allow_fallbacks: True => 同模型换其他 provider
-    # - sort: throughput 优先高吞吐 provider
-    provider_ctl = {
-        "ignore": ["Chutes"],
-        "allow_fallbacks": True,
-        "sort": "throughput",
-        "require_parameters": True,
-    }
+    # 从 .env 读取 provider 配置
+    provider_config = get_provider_config()
 
     payload = {
         "model": use_model,
@@ -94,8 +105,11 @@ def call_scoring_llm(
         ],
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
-        "provider": provider_ctl,
     }
+    
+    # 只有配置了 provider 才添加到 payload
+    if provider_config:
+        payload["provider"] = provider_config
 
     # circuit breaker：如果刚被连续429打爆，直接返回空（让上层缺省或 early-stop）
     now = time.time()
