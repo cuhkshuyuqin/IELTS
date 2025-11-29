@@ -41,6 +41,13 @@ from evolver.prompt_evolver import (
 )
 from evolver.data_aware_prompt import PromptGenome, build_full_prompt, INSTRUCTION_TEMPLATES
 from evolver.icl_sampler import select_icl_examples
+from evolver.checkpoint import (  # 🔥 新增：断点续传
+    save_checkpoint,
+    load_checkpoint,
+    restore_population,
+    restore_best_individual,
+    clean_old_checkpoints,
+)
 from llm_api.openrouter_api import call_scoring_llm
 
 # ================== 路径 & 常量配置 ================== #
@@ -63,6 +70,12 @@ METRIC_FIG = LOG_DIR / "metrics_curve_hf.png"
 # ✅ 模板池持久化路径
 TEMPLATE_POOL_JSON = LOG_DIR / "template_pool.json"
 
+# 🔥 断点续传配置
+CHECKPOINT_DIR = LOG_DIR / "checkpoints"
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+ENABLE_CHECKPOINT = os.getenv("ENABLE_CHECKPOINT", "1") == "1"
+CHECKPOINT_EVERY_GEN = int(os.getenv("CHECKPOINT_EVERY_GEN", "1"))  # 每 N 代保存一次
+
 # -------- GA 超参数 --------
 POP_SIZE = 10
 N_GENERATIONS = 6
@@ -70,7 +83,12 @@ TOURNAMENT_K = 4
 CROSSOVER_RATE = 0.85
 MUTATION_RATE = 0.35
 
-N_EVAL_SAMPLES = 64
+# 🔥 分阶段评估配置
+USE_STAGED_EVAL = os.getenv("USE_STAGED_EVAL", "0") == "1"
+N_EVAL_SAMPLES = int(os.getenv("N_EVAL_SAMPLES", "64"))
+N_EVAL_SAMPLES_EARLY = int(os.getenv("N_EVAL_SAMPLES_EARLY", "32"))
+N_EVAL_SAMPLES_LATE = int(os.getenv("N_EVAL_SAMPLES_LATE", "64"))
+EARLY_PHASE_RATIO = float(os.getenv("EARLY_PHASE_RATIO", "0.67"))
 
 MAX_CONTEXT_CHARS = 12000
 EARLYSTOP_CONSEC_FAIL = 3
@@ -294,12 +312,24 @@ def evaluate_individual(
 
     for i, (sid, essay, true_band, prompt_text) in enumerate(eval_pool, start=1):
 
-        icl_examples = select_icl_examples(
-            train_pool,
-            strategy=ind.genome.icl_strategy,
-            k=ind.genome.k_shots,
-            seed=sid,
-        )
+        # 🔥 根据模式选择 ICL 示例
+        if ind.genome.use_icl_indices and ind.genome.icl_indices:
+            # 新模式：使用索引列表
+            icl_examples = select_icl_examples(
+                train_pool,
+                strategy="random",  # 不使用
+                k=ind.genome.k_shots,
+                seed=sid,
+                indices=ind.genome.icl_indices,
+            )
+        else:
+            # 旧模式：使用策略
+            icl_examples = select_icl_examples(
+                train_pool,
+                strategy=ind.genome.icl_strategy,
+                k=ind.genome.k_shots,
+                seed=sid,
+            )
 
         rag_examples = rag.retrieve(
             essay,
@@ -391,6 +421,30 @@ def evaluate_individual(
     return m
 
 
+def get_eval_pool_size(gen: int, total_gens: int) -> int:
+    """
+    根据代数返回评估样本数。
+    
+    如果启用分阶段评估：
+    - 前期（前 67% 代数）：使用较少样本快速筛选
+    - 后期（后 33% 代数）：使用较多样本精确评估
+    
+    Args:
+        gen: 当前代数
+        total_gens: 总代数
+    
+    Returns:
+        评估样本数
+    """
+    if not USE_STAGED_EVAL:
+        return N_EVAL_SAMPLES
+    
+    if gen <= total_gens * EARLY_PHASE_RATIO:
+        return N_EVAL_SAMPLES_EARLY
+    else:
+        return N_EVAL_SAMPLES_LATE
+
+
 def stratified_sample(eval_pool_full, n=32, seed=42):
     rng = random.Random(seed)
     buckets = {}
@@ -423,30 +477,60 @@ def stratified_sample(eval_pool_full, n=32, seed=42):
 def run_evolution_hf_icl_only():
     print("==== Data-Aware AlphaEvolve (ICL-only baseline, OpenRouter) ====")
     print(f"Single model: {SINGLE_MODEL}")
+    print(f"Checkpoint enabled: {ENABLE_CHECKPOINT}")
 
     # ✅ 启动时加载模板池
     load_template_pool(TEMPLATE_POOL_JSON)
 
     train_pool, eval_pool_full = load_hf_dataset()
-
-    if len(eval_pool_full) > N_EVAL_SAMPLES:
-        eval_pool = stratified_sample(eval_pool_full, n=N_EVAL_SAMPLES, seed=42)
+    
+    print(f"Train pool: {len(train_pool)} | Eval pool (full): {len(eval_pool_full)}")
+    
+    if USE_STAGED_EVAL:
+        print(f"🎯 Staged evaluation enabled:")
+        print(f"   Early phase (gen 1-{int(N_GENERATIONS * EARLY_PHASE_RATIO)}): {N_EVAL_SAMPLES_EARLY} samples")
+        print(f"   Late phase (gen {int(N_GENERATIONS * EARLY_PHASE_RATIO)+1}-{N_GENERATIONS}): {N_EVAL_SAMPLES_LATE} samples")
     else:
-        eval_pool = eval_pool_full
+        print(f"📊 Fixed evaluation: {N_EVAL_SAMPLES} samples per generation")
 
-    print(f"Eval pool: {len(eval_pool)} | Train pool: {len(train_pool)}")
-
-    population: List[Individual] = build_initial_population(pop_size=POP_SIZE)
-
-    history_qwk, history_pearson, history_rmse = [], [], []
-    history_llm_stats: List[Dict[str, Any]] = []
-
-    best_overall_ind: Optional[Individual] = None
-    best_overall_fitness = -math.inf
+    # 🔥 尝试从检查点恢复
+    checkpoint = None
+    if ENABLE_CHECKPOINT:
+        latest_checkpoint = CHECKPOINT_DIR / "checkpoint_latest.json"
+        checkpoint = load_checkpoint(latest_checkpoint)
+    
+    # 初始化或恢复状态
+    if checkpoint is not None:
+        print("\n🔄 Resuming from checkpoint...")
+        start_gen = checkpoint["generation"] + 1
+        population = restore_population(checkpoint["population"])
+        best_overall_ind = restore_best_individual(checkpoint["best_overall"])
+        best_overall_fitness = checkpoint["best_overall_fitness"]
+        history_qwk = checkpoint["history"]["qwk"]
+        history_pearson = checkpoint["history"]["pearson"]
+        history_rmse = checkpoint["history"]["rmse"]
+        history_llm_stats = checkpoint["history"]["llm_stats"]
+        
+        # 恢复 LLM 缓存
+        global _LLM_CACHE
+        _LLM_CACHE = checkpoint.get("llm_cache", {})
+        print(f"   Restored {len(_LLM_CACHE)} cached LLM calls")
+        print(f"   Starting from generation {start_gen}")
+    else:
+        print("\n🆕 Starting fresh evolution...")
+        start_gen = 1
+        population = build_initial_population(
+            pop_size=POP_SIZE,
+            train_pool_size=len(train_pool)
+        )
+        history_qwk, history_pearson, history_rmse = [], [], []
+        history_llm_stats: List[Dict[str, Any]] = []
+        best_overall_ind: Optional[Individual] = None
+        best_overall_fitness = -math.inf
 
     rag = DummyRAG()
 
-    for gen in range(1, N_GENERATIONS + 1):
+    for gen in range(start_gen, N_GENERATIONS + 1):
         print(f"\n=== Generation {gen}/{N_GENERATIONS} ===")
 
         # ✅ 每代开始清空 LLM 统计：统计“本代产生下一代时”的 LLM 贡献
@@ -521,7 +605,10 @@ def run_evolution_hf_icl_only():
                     child_genome = crossover_genome(p1.genome, p2.genome, rng)
 
                 child_genome = mutate_genome(
-                    child_genome, mutation_rate=MUTATION_RATE, rng=rng
+                    child_genome, 
+                    mutation_rate=MUTATION_RATE, 
+                    rng=rng,
+                    train_pool_size=len(train_pool)
                 )
                 new_population.append(Individual(genome=child_genome))
 
@@ -532,6 +619,44 @@ def run_evolution_hf_icl_only():
         history_llm_stats.append({"gen": gen, **stats})
         print(f"\n[Gen {gen}] LLM mutation stats:")
         print(json.dumps(stats, ensure_ascii=False, indent=2))
+        
+        # 🔥 保存检查点
+        if ENABLE_CHECKPOINT and gen % CHECKPOINT_EVERY_GEN == 0:
+            try:
+                # 保存到 latest（用于恢复）
+                latest_checkpoint = CHECKPOINT_DIR / "checkpoint_latest.json"
+                save_checkpoint(
+                    latest_checkpoint,
+                    gen,
+                    population,
+                    best_overall_ind,
+                    best_overall_fitness,
+                    history_qwk,
+                    history_pearson,
+                    history_rmse,
+                    history_llm_stats,
+                    _LLM_CACHE,
+                )
+                
+                # 同时保存带代数的备份
+                gen_checkpoint = CHECKPOINT_DIR / f"checkpoint_gen_{gen}.json"
+                save_checkpoint(
+                    gen_checkpoint,
+                    gen,
+                    population,
+                    best_overall_ind,
+                    best_overall_fitness,
+                    history_qwk,
+                    history_pearson,
+                    history_rmse,
+                    history_llm_stats,
+                    _LLM_CACHE,
+                )
+                
+                # 清理旧检查点（保留最近 3 个）
+                clean_old_checkpoints(CHECKPOINT_DIR, keep_last=3)
+            except Exception as e:
+                print(f"⚠️  Failed to save checkpoint: {e}")
 
     print("\n==== Evolution Finished (HF ICL-only) ====")
     if best_overall_ind is None:
@@ -589,12 +714,22 @@ def run_evolution_hf_icl_only():
     preds, raws, labels, essays_out = [], [], [], []
 
     for i, (sid, essay, true_band, prompt_text) in enumerate(final_pool, start=1):
-        icl_examples = select_icl_examples(
-            train_pool,
-            strategy=best_overall_ind.genome.icl_strategy,
-            k=best_overall_ind.genome.k_shots,
-            seed=sid,
-        )
+        # 🔥 根据模式选择 ICL 示例
+        if best_overall_ind.genome.use_icl_indices and best_overall_ind.genome.icl_indices:
+            icl_examples = select_icl_examples(
+                train_pool,
+                strategy="random",
+                k=best_overall_ind.genome.k_shots,
+                seed=sid,
+                indices=best_overall_ind.genome.icl_indices,
+            )
+        else:
+            icl_examples = select_icl_examples(
+                train_pool,
+                strategy=best_overall_ind.genome.icl_strategy,
+                k=best_overall_ind.genome.k_shots,
+                seed=sid,
+            )
 
         full_prompt = build_full_prompt(
             genome=best_overall_ind.genome,

@@ -8,13 +8,21 @@ from typing import List, Optional, Dict, Any
 @dataclass(frozen=True)
 class PromptGenome:
     instruction_id: int = 0
-    instruction_text: Optional[str] = None  # ✅ 新增：LLM 生成的新模板文本（优先级最高）
+    instruction_text: Optional[str] = None  # ✅ LLM 生成的新模板文本（优先级最高）
     strictness: int = 1
     output_format: str = "scalar"
 
+    # ===== ICL 策略：两种模式 =====
+    use_icl_indices: bool = False  # 🔥 开关：True=使用索引列表，False=使用策略
+    
+    # 模式1：策略驱动（旧方式）
     icl_strategy: str = "random"
     k_shots: int = 0
-
+    
+    # 模式2：索引驱动（新方式）
+    icl_indices: Optional[tuple] = None  # 🔥 训练集索引列表，如 (12, 45, 78, ...)
+    
+    # ===== 其他 =====
     rag_strategy: str = "none"
     use_summary: bool = False
 

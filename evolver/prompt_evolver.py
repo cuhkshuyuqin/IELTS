@@ -31,6 +31,10 @@ INSTRUCTION_IDS = sorted(list(INSTRUCTION_TEMPLATES.keys()))
 STRICTNESS_LEVELS = [0, 1]
 OUTPUT_FORMATS = ["scalar"]
 
+# 🔥 ICL 模式开关
+USE_ICL_INDICES_MODE = os.getenv("USE_ICL_INDICES_MODE", "0") == "1"  # 默认关闭，使用旧策略
+
+# 旧策略参数
 ICL_STRATEGIES = [
     "random",
     "score_balanced",
@@ -40,6 +44,9 @@ ICL_STRATEGIES = [
 ]
 
 K_SHOTS = [6, 8, 10, 12, 16]
+
+# 新索引模式参数
+ICL_K_SHOTS_FIXED = int(os.getenv("ICL_K_SHOTS_FIXED", "8"))  # 固定的 k_shots 数量
 
 RAG_STRATEGIES = ["none"]
 USE_SUMMARY = [False]
@@ -225,24 +232,60 @@ _TEXT_GUARD = (
 )
 
 
-def random_genome(rng: random.Random, instruction_text: Optional[str] = None) -> PromptGenome:
-    return PromptGenome(
-        instruction_id=rng.choice(INSTRUCTION_IDS),
-        instruction_text=instruction_text,
-        strictness=rng.choice(STRICTNESS_LEVELS),
-        output_format=rng.choice(OUTPUT_FORMATS),
-        icl_strategy=rng.choice(ICL_STRATEGIES),
-        k_shots=rng.choice(K_SHOTS),
-        rag_strategy=rng.choice(RAG_STRATEGIES),
-        use_summary=rng.choice(USE_SUMMARY),
-        use_teacher=rng.choice(USE_TEACHER),
-        teacher_weight=rng.choice(TEACHER_WEIGHT),
-    )
+def random_genome(rng: random.Random, instruction_text: Optional[str] = None, train_pool_size: int = 1000) -> PromptGenome:
+    """
+    生成随机基因组。
+    
+    Args:
+        rng: 随机数生成器
+        instruction_text: 可选的指令文本
+        train_pool_size: 训练集大小，用于生成随机索引
+    """
+    # 🔥 根据模式选择 ICL 参数
+    if USE_ICL_INDICES_MODE:
+        # 新模式：生成随机索引列表
+        k = ICL_K_SHOTS_FIXED
+        indices = tuple(rng.sample(range(train_pool_size), min(k, train_pool_size)))
+        return PromptGenome(
+            instruction_id=rng.choice(INSTRUCTION_IDS),
+            instruction_text=instruction_text,
+            strictness=rng.choice(STRICTNESS_LEVELS),
+            output_format=rng.choice(OUTPUT_FORMATS),
+            use_icl_indices=True,
+            icl_strategy="random",  # 保留字段但不使用
+            k_shots=k,
+            icl_indices=indices,
+            rag_strategy=rng.choice(RAG_STRATEGIES),
+            use_summary=rng.choice(USE_SUMMARY),
+            use_teacher=rng.choice(USE_TEACHER),
+            teacher_weight=rng.choice(TEACHER_WEIGHT),
+        )
+    else:
+        # 旧模式：使用策略
+        return PromptGenome(
+            instruction_id=rng.choice(INSTRUCTION_IDS),
+            instruction_text=instruction_text,
+            strictness=rng.choice(STRICTNESS_LEVELS),
+            output_format=rng.choice(OUTPUT_FORMATS),
+            use_icl_indices=False,
+            icl_strategy=rng.choice(ICL_STRATEGIES),
+            k_shots=rng.choice(K_SHOTS),
+            icl_indices=None,
+            rag_strategy=rng.choice(RAG_STRATEGIES),
+            use_summary=rng.choice(USE_SUMMARY),
+            use_teacher=rng.choice(USE_TEACHER),
+            teacher_weight=rng.choice(TEACHER_WEIGHT),
+        )
 
 
-def build_initial_population(pop_size: int, seed: int = 42) -> List[Individual]:
+def build_initial_population(pop_size: int, seed: int = 42, train_pool_size: int = 1000) -> List[Individual]:
     """
     ✅ 初始种群模板池占比降低到 25%，给 LLM 留更多进化空间
+    
+    Args:
+        pop_size: 种群大小
+        seed: 随机种子
+        train_pool_size: 训练集大小（用于索引模式）
     """
     rng = random.Random(seed)
     pop: List[Individual] = []
@@ -250,10 +293,10 @@ def build_initial_population(pop_size: int, seed: int = 42) -> List[Individual]:
     pool_n = max(1, int(pop_size * 0.25))
     pool_texts = get_template_pool_texts(topk=pool_n)
     for t in pool_texts:
-        pop.append(Individual(genome=random_genome(rng, instruction_text=t)))
+        pop.append(Individual(genome=random_genome(rng, instruction_text=t, train_pool_size=train_pool_size)))
 
     while len(pop) < pop_size:
-        pop.append(Individual(genome=random_genome(rng)))
+        pop.append(Individual(genome=random_genome(rng, train_pool_size=train_pool_size)))
 
     return pop
 
@@ -275,6 +318,7 @@ def tournament_selection(
 def crossover_genome(g1: PromptGenome, g2: PromptGenome, rng: random.Random) -> PromptGenome:
     """
     ✅ 让包含 LLM 产物的 instruction_text 更容易保留下来
+    🔥 支持索引列表的交叉（单点交叉或均匀交叉）
     """
     instruction_text = rng.choice([g1.instruction_text, g2.instruction_text])
 
@@ -285,13 +329,35 @@ def crossover_genome(g1: PromptGenome, g2: PromptGenome, rng: random.Random) -> 
 
     instruction_text = _clean_instruction_text(instruction_text or "") or instruction_text  # ✅ FIX
 
+    # 🔥 ICL 索引交叉
+    icl_indices = None
+    if USE_ICL_INDICES_MODE and g1.icl_indices and g2.icl_indices:
+        # 均匀交叉：从两个父代随机选择索引
+        len1, len2 = len(g1.icl_indices), len(g2.icl_indices)
+        max_len = max(len1, len2)
+        child_indices = []
+        for i in range(max_len):
+            if i < len1 and i < len2:
+                child_indices.append(rng.choice([g1.icl_indices[i], g2.icl_indices[i]]))
+            elif i < len1:
+                child_indices.append(g1.icl_indices[i])
+            else:
+                child_indices.append(g2.icl_indices[i])
+        icl_indices = tuple(child_indices)
+    elif g1.icl_indices:
+        icl_indices = g1.icl_indices
+    elif g2.icl_indices:
+        icl_indices = g2.icl_indices
+
     return PromptGenome(
         instruction_id=rng.choice([g1.instruction_id, g2.instruction_id]),
         instruction_text=instruction_text,
         strictness=rng.choice([g1.strictness, g2.strictness]),
         output_format=rng.choice([g1.output_format, g2.output_format]),
+        use_icl_indices=g1.use_icl_indices or g2.use_icl_indices,
         icl_strategy=rng.choice([g1.icl_strategy, g2.icl_strategy]),
         k_shots=rng.choice([g1.k_shots, g2.k_shots]),
+        icl_indices=icl_indices,
         rag_strategy=rng.choice([g1.rag_strategy, g2.rag_strategy]),
         use_summary=rng.choice([g1.use_summary, g2.use_summary]),
         use_teacher=rng.choice([g1.use_teacher, g2.use_teacher]),
@@ -538,7 +604,15 @@ def llm_generate_new_instruction(current: PromptGenome) -> Optional[str]:
 
 # ================== mutation ================== #
 
-def mutate_genome(g: PromptGenome, mutation_rate: float, rng: random.Random) -> PromptGenome:
+def mutate_genome(g: PromptGenome, mutation_rate: float, rng: random.Random, train_pool_size: int = 1000) -> PromptGenome:
+    """
+    变异基因组。
+    
+    🔥 新增：支持索引列表的变异
+    - 替换变异：随机替换某个索引
+    - 插入变异：插入新索引
+    - 删除变异：删除某个索引
+    """
     new_instruction_text = g.instruction_text
     new_instruction_id = g.instruction_id
 
@@ -549,23 +623,52 @@ def mutate_genome(g: PromptGenome, mutation_rate: float, rng: random.Random) -> 
         if t is not None:
             new_instruction_text = _clean_instruction_text(t)  # ✅ FIX
 
-    # ---- 2) ICL-level mutation by LLM ----
+    # ---- 2) ICL-level mutation ----
     new_icl_strategy = g.icl_strategy
     new_k_shots = g.k_shots
+    new_icl_indices = g.icl_indices
     llm_icl_used = False
 
-    if USE_LLM_ICL_MUTATION and rng.random() < LLM_ICL_MUTATION_PROB:
-        _stat_inc("icl", "triggered", 1)
-        sel = llm_choose_icl(g)
-        if sel is not None:
-            new_icl_strategy, new_k_shots = sel
-            llm_icl_used = True
+    if USE_ICL_INDICES_MODE:
+        # 🔥 新模式：变异索引列表
+        if g.icl_indices and rng.random() < mutation_rate:
+            indices_list = list(g.icl_indices)
+            
+            # 三种变异操作，随机选择
+            mutation_type = rng.choice(["replace", "insert", "delete"])
+            
+            if mutation_type == "replace" and indices_list:
+                # 替换：随机选一个位置，替换为新索引
+                pos = rng.randint(0, len(indices_list) - 1)
+                new_idx = rng.randint(0, train_pool_size - 1)
+                indices_list[pos] = new_idx
+                
+            elif mutation_type == "insert" and len(indices_list) < ICL_K_SHOTS_FIXED * 2:
+                # 插入：添加新索引（限制最大长度）
+                new_idx = rng.randint(0, train_pool_size - 1)
+                pos = rng.randint(0, len(indices_list))
+                indices_list.insert(pos, new_idx)
+                
+            elif mutation_type == "delete" and len(indices_list) > 1:
+                # 删除：移除一个索引（保证至少1个）
+                pos = rng.randint(0, len(indices_list) - 1)
+                indices_list.pop(pos)
+            
+            new_icl_indices = tuple(indices_list)
+    else:
+        # 🔥 旧模式：策略驱动的 ICL 变异
+        if USE_LLM_ICL_MUTATION and rng.random() < LLM_ICL_MUTATION_PROB:
+            _stat_inc("icl", "triggered", 1)
+            sel = llm_choose_icl(g)
+            if sel is not None:
+                new_icl_strategy, new_k_shots = sel
+                llm_icl_used = True
 
     # ---- 3) discrete fallback ----
     def maybe(v, space):
         return rng.choice(space) if rng.random() < mutation_rate else v
 
-    if not llm_icl_used:
+    if not USE_ICL_INDICES_MODE and not llm_icl_used:
         new_icl_strategy = maybe(new_icl_strategy, ICL_STRATEGIES)
         new_k_shots = maybe(new_k_shots, K_SHOTS)
 
@@ -574,8 +677,10 @@ def mutate_genome(g: PromptGenome, mutation_rate: float, rng: random.Random) -> 
         instruction_text=_clean_instruction_text(new_instruction_text or "") or new_instruction_text,  # ✅ FIX
         strictness=maybe(g.strictness, STRICTNESS_LEVELS),
         output_format=g.output_format,
+        use_icl_indices=g.use_icl_indices,
         icl_strategy=new_icl_strategy,
         k_shots=new_k_shots,
+        icl_indices=new_icl_indices,
         rag_strategy=maybe(g.rag_strategy, RAG_STRATEGIES),
         use_summary=maybe(g.use_summary, USE_SUMMARY),
         use_teacher=maybe(g.use_teacher, USE_TEACHER),

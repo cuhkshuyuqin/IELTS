@@ -11,6 +11,11 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "mistralai/mistral-small-3.1-24b-instruct:free")
 
+# 🔥 可配置的超时和重试参数
+DEFAULT_TIMEOUT = float(os.getenv("OPENROUTER_TIMEOUT", "5.0"))  # 默认 5 秒
+DEFAULT_MAX_RETRIES = int(os.getenv("OPENROUTER_MAX_RETRIES", "3"))  # 默认重试 3 次
+RETRY_BACKOFF_BASE = float(os.getenv("OPENROUTER_RETRY_BACKOFF", "2.0"))  # 指数退避基数
+
 # ======= Provider 配置（从 .env 读取）=======
 def get_provider_config() -> Optional[Dict[str, Any]]:
     """
@@ -72,16 +77,32 @@ def _payload(use_model: str, prompt: str, temperature: float, max_tokens: int):
 def call_scoring_llm(
     prompt: str,
     temperature: float = 0.0,
-    max_retries: int = 6,
-    timeout: int = 90,
+    max_retries: Optional[int] = None,
+    timeout: Optional[float] = None,
     model: Optional[str] = None,
     max_tokens: int = 8,
 ) -> str:
+    """
+    调用 OpenRouter API 进行评分。
+    
+    Args:
+        prompt: 输入的 prompt
+        temperature: 温度参数
+        max_retries: 最大重试次数（None 则使用环境变量配置）
+        timeout: 超时时间（秒，None 则使用环境变量配置）
+        model: 模型名称
+        max_tokens: 最大 token 数
+    
+    Returns:
+        LLM 返回的文本，失败返回空字符串
+    """
     api_key = os.getenv(OPENROUTER_API_KEY_ENV)
     if not api_key:
         raise RuntimeError(f"Please set env {OPENROUTER_API_KEY_ENV}")
 
     use_model = model or DEFAULT_MODEL
+    use_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    use_max_retries = max_retries if max_retries is not None else DEFAULT_MAX_RETRIES
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -114,32 +135,41 @@ def call_scoring_llm(
     # circuit breaker：如果刚被连续429打爆，直接返回空（让上层缺省或 early-stop）
     now = time.time()
     if now < _CB_STATE["blocked_until"]:
-        print(f"[评分LLM-OpenRouter] {use_model} circuit-breaker active, skip call.")
+        print(f"[OpenRouter] {use_model} circuit-breaker active, skip call.")
         return ""
 
     last_err = None
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, use_max_retries + 1):
         try:
-            r = requests.post(OPENROUTER_API_URL, headers=headers, json=payload, timeout=timeout)
+            # 🔥 使用配置的超时时间
+            start_time = time.time()
+            r = requests.post(
+                OPENROUTER_API_URL, 
+                headers=headers, 
+                json=payload, 
+                timeout=use_timeout
+            )
+            elapsed = time.time() - start_time
 
+            # 处理各种 HTTP 状态码
             if r.status_code in (402, 500, 502, 503):
-                backoff = min(2 ** attempt + random.random(), 15)
-                print(f"[评分LLM-OpenRouter] {use_model} -> {r.status_code}, backoff {backoff:.1f}s")
+                backoff = min(RETRY_BACKOFF_BASE ** attempt + random.random(), 15)
+                print(f"[OpenRouter] {use_model} -> {r.status_code} (attempt {attempt}/{use_max_retries}), backoff {backoff:.1f}s")
                 time.sleep(backoff)
                 last_err = r.text
                 continue
 
             if r.status_code == 429:
                 _CB_STATE["consec_429"] += 1
-                backoff = min(2 ** attempt + random.random() * 1.5, 20)
-                print(f"[评分LLM-OpenRouter] {use_model} -> 429, backoff {backoff:.1f}s")
+                backoff = min(RETRY_BACKOFF_BASE ** attempt + random.random() * 1.5, 20)
+                print(f"[OpenRouter] {use_model} -> 429 (attempt {attempt}/{use_max_retries}), backoff {backoff:.1f}s")
                 time.sleep(backoff)
                 last_err = r.text
 
-                # 连续 3 次 429：触发短路（避免你一轮 GA 白耗很多次）
+                # 连续 3 次 429：触发短路
                 if _CB_STATE["consec_429"] >= 3:
-                    _CB_STATE["blocked_until"] = time.time() + 60  # 60s 内跳过调用
-                    print(f"[评分LLM-OpenRouter] {use_model} upstream 429 streak -> open circuit.")
+                    _CB_STATE["blocked_until"] = time.time() + 60
+                    print(f"[OpenRouter] {use_model} upstream 429 streak -> open circuit for 60s.")
                     break
                 continue
 
@@ -149,13 +179,37 @@ def call_scoring_llm(
 
             # 成功就重置 429 streak
             _CB_STATE["consec_429"] = 0
+            print(f"[OpenRouter] ✅ {use_model} responded in {elapsed:.2f}s")
             return text
 
-        except Exception as e:
-            last_err = e
-            backoff = min(2 ** attempt + random.random(), 15)
-            print(f"[评分LLM-OpenRouter] {use_model} exception {e} -> backoff {backoff:.1f}s")
+        except requests.exceptions.Timeout:
+            # 🔥 超时处理
+            last_err = f"Timeout after {use_timeout}s"
+            print(f"[OpenRouter] ⏱️  {use_model} timeout ({use_timeout}s) on attempt {attempt}/{use_max_retries}")
+            
+            # 超时后立即重试，不等待
+            if attempt < use_max_retries:
+                print(f"[OpenRouter] 🔄 Retrying immediately...")
+                continue
+            else:
+                print(f"[OpenRouter] ❌ Max retries reached after timeout")
+                break
+        
+        except requests.exceptions.RequestException as e:
+            # 🔥 网络错误处理
+            last_err = str(e)
+            backoff = min(RETRY_BACKOFF_BASE ** attempt + random.random(), 10)
+            print(f"[OpenRouter] 🌐 {use_model} network error: {e} (attempt {attempt}/{use_max_retries}), backoff {backoff:.1f}s")
             time.sleep(backoff)
+            continue
+        
+        except Exception as e:
+            # 🔥 其他异常
+            last_err = str(e)
+            backoff = min(RETRY_BACKOFF_BASE ** attempt + random.random(), 10)
+            print(f"[OpenRouter] ⚠️  {use_model} exception: {e} (attempt {attempt}/{use_max_retries}), backoff {backoff:.1f}s")
+            time.sleep(backoff)
+            continue
 
-    print(f"[评分LLM-OpenRouter] ❌ all retries failed on {use_model}, last_err={last_err}")
+    print(f"[OpenRouter] ❌ All retries failed for {use_model}, last_err={last_err}")
     return ""

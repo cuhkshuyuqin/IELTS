@@ -83,9 +83,14 @@ def select_icl_examples(
     k: int = 4,
     seed: int = 42,
     anchor_band: Optional[float] = None,
+    indices: Optional[Sequence[int]] = None,  # 🔥 新增：直接指定索引列表
 ) -> List[Dict[str, Any]]:
     """
-    Select k ICL examples from train_pool according to strategy.
+    Select k ICL examples from train_pool according to strategy or indices.
+    
+    If indices is provided, use them directly (ignoring strategy).
+    Otherwise, use the strategy-based selection.
+    
     Return list of dict samples.
     """
     if k <= 0:
@@ -96,6 +101,17 @@ def select_icl_examples(
     if not pool:
         return []
 
+    # 🔥 模式1：使用索引列表（优先）
+    if indices is not None:
+        chosen = []
+        for idx in indices:
+            if 0 <= idx < len(pool):
+                chosen.append(pool[idx])
+            if len(chosen) >= k:
+                break
+        return chosen[:k]
+
+    # 🔥 模式2：使用策略（原有逻辑）
     k = min(k, len(pool))
 
     # -------- random --------

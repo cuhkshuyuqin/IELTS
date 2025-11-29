@@ -5,10 +5,13 @@
 ## 功能特性
 
 - **结构化 Prompt 进化**：使用 PromptGenome + 遗传算法优化评分指令
-- **Few-shot ICL**：示例随基因一起进化（策略和数量可配置）
+- **双模式 Few-shot ICL**：
+  - 策略模式：进化采样策略（random, balanced, extreme 等）
+  - 索引模式：直接进化示例索引列表（更精细控制）
 - **多指标评估**：QWK / Pearson / RMSE / Accuracy
 - **LLM 驱动变异**：基于偏差统计的智能 Prompt 优化
 - **模板池管理**：自动积累和复用高质量模板
+- **断点续传**：自动保存进度，网络中断后可继续运行
 
 ## 快速开始
 
@@ -20,11 +23,13 @@ pip install -r requirements.txt
 
 ### 配置环境
 
-配置 `.env` 文件
+配置 `.env` 文件：
 
-将OPENROUTER_API_KEY加入环境变量
-```
-OPENROUTER_API_KEY=your_key_here
+设置OPENROUTER_API_KEY环境变量
+
+```bash
+# API 配置
+export OPENROUTER_API_KEY=your_key_here
 ```
 
 ### 运行进化
